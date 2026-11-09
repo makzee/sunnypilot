@@ -4,6 +4,7 @@ Copyright (c) 2021-, Haibin Wen, sunnypilot, and a number of other contributors.
 This file is part of sunnypilot and is licensed under the MIT License.
 See the LICENSE.md file in the root directory for more details.
 """
+import time
 from enum import Enum
 
 from openpilot.cereal import messaging, log, custom
@@ -14,6 +15,7 @@ from openpilot.selfdrive.ui.sunnypilot.layouts.settings.display import OnroadBri
 from openpilot.sunnypilot.models.helpers import ACTIVE_BUNDLE_KEYS, get_active_source
 from openpilot.sunnypilot.sunnylink.sunnylink_state import SunnylinkState
 from openpilot.system.ui.lib.application import gui_app
+from openpilot.system.ui.lib.multilang import tr
 from openpilot.system.ui.sunnypilot.widgets.screen_saver import ScreenSaverSP
 
 OpenpilotState = log.SelfdriveState.OpenpilotState
@@ -66,12 +68,36 @@ class UIStateSP:
     self.custom_torque_params: bool = False
     self.torque_override_enabled: bool = False
     self._sp_initialized: bool = False
+    self._crash_prompt_shown: bool = False
+    self._crash_since: float | None = None
 
   def update(self) -> None:
+    self._update_crash_prompt()
+
     if self.sunnylink_enabled:
       self.sunnylink_state.start()
     else:
       self.sunnylink_state.stop()
+
+  def _update_crash_prompt(self) -> None:
+    # Offer a reboot when a crashed process blocks engagement; once per crash episode
+    crashed = self.started and any(e.name == log.OnroadEvent.EventName.processNotRunning for e in self.sm["onroadEvents"])
+    if not crashed:
+      self._crash_prompt_shown = False
+      self._crash_since = None
+      return
+    if self._crash_since is None:
+      self._crash_since = time.monotonic()
+    # 5s debounce so processes still starting up at boot don't trigger it
+    if not self._crash_prompt_shown and time.monotonic() - self._crash_since > 5 and not self.engaged and gui_app.big_ui():
+      self._crash_prompt_shown = True
+      from openpilot.system.ui.widgets import DialogResult
+      from openpilot.system.ui.widgets.confirm_dialog import ConfirmDialog
+      gui_app.push_widget(ConfirmDialog(
+        tr("A system process stopped running and sunnypilot can't engage. Restart the device?"),
+        tr("Restart"), tr("Dismiss"),
+        callback=lambda res: self.params.put_bool("DoReboot", True) if res == DialogResult.CONFIRM else None,
+      ))
 
   def onroad_brightness_handle_alerts(self, _ui_state, alert):
     if _ui_state.sm.recv_frame["carState"] < _ui_state.started_frame:
